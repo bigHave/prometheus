@@ -16,8 +16,6 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -50,6 +48,7 @@ import (
 	"github.com/prometheus/prometheus/discovery"
 	sd_config "github.com/prometheus/prometheus/discovery/config"
 	"github.com/prometheus/prometheus/notifier"
+	"github.com/prometheus/prometheus/pkg/logging"
 	"github.com/prometheus/prometheus/pkg/relabel"
 	prom_runtime "github.com/prometheus/prometheus/pkg/runtime"
 	"github.com/prometheus/prometheus/promql"
@@ -237,7 +236,7 @@ func main() {
 	a.Flag("alertmanager.timeout", "Timeout for sending alerts to Alertmanager.").
 		Default("10s").SetValue(&cfg.notifierTimeout)
 
-	a.Flag("query.lookback-delta", "The maximum lookback duration for retrieving metrics during expression evaluations.").
+	a.Flag("query.lookback-delta", "The maximum lookback duration for retrieving metrics during expression evaluations and federation.").
 		Default("5m").SetValue(&cfg.lookbackDelta)
 
 	a.Flag("query.timeout", "Maximum time a query may take before being aborted.").
@@ -322,7 +321,6 @@ func main() {
 		}
 	}
 
-	promql.LookbackDelta = time.Duration(cfg.lookbackDelta)
 	promql.SetDefaultEvaluationInterval(time.Duration(config.DefaultGlobalConfig.EvaluationInterval))
 
 	// Above level 6, the k8s client would log bearer tokens in clear-text.
@@ -358,10 +356,10 @@ func main() {
 		opts = promql.EngineOpts{
 			Logger:             log.With(logger, "component", "query engine"),
 			Reg:                prometheus.DefaultRegisterer,
-			MaxConcurrent:      cfg.queryConcurrency,
 			MaxSamples:         cfg.queryMaxSamples,
 			Timeout:            time.Duration(cfg.queryTimeout),
 			ActiveQueryTracker: promql.NewActiveQueryTracker(cfg.localStoragePath, cfg.queryConcurrency, log.With(logger, "component", "activeQueryTracker")),
+			LookbackDelta:      time.Duration(cfg.lookbackDelta),
 		}
 
 		queryEngine = promql.NewEngine(opts)
@@ -389,6 +387,7 @@ func main() {
 	cfg.web.RuleManager = ruleManager
 	cfg.web.Notifier = notifierManager
 	cfg.web.TSDBCfg = cfg.tsdb
+	cfg.web.LookbackDelta = time.Duration(cfg.lookbackDelta)
 
 	cfg.web.Version = &web.PrometheusVersion{
 		Version:   version.Version,
@@ -422,6 +421,19 @@ func main() {
 	reloaders := []func(cfg *config.Config) error{
 		remoteStorage.ApplyConfig,
 		webHandler.ApplyConfig,
+		func(cfg *config.Config) error {
+			if cfg.GlobalConfig.QueryLogFile == "" {
+				queryEngine.SetQueryLogger(nil)
+				return nil
+			}
+
+			l, err := logging.NewJSONFileLogger(cfg.GlobalConfig.QueryLogFile)
+			if err != nil {
+				return err
+			}
+			queryEngine.SetQueryLogger(l)
+			return nil
+		},
 		// The Scrape and notifier managers need to reload before the Discovery manager as
 		// they need to read the most updated config when receiving the new targets list.
 		scrapeManager.ApplyConfig,
@@ -435,13 +447,8 @@ func main() {
 		notifierManager.ApplyConfig,
 		func(cfg *config.Config) error {
 			c := make(map[string]sd_config.ServiceDiscoveryConfig)
-			for _, v := range cfg.AlertingConfig.AlertmanagerConfigs {
-				// AlertmanagerConfigs doesn't hold an unique identifier so we use the config hash as the identifier.
-				b, err := json.Marshal(v)
-				if err != nil {
-					return err
-				}
-				c[fmt.Sprintf("%x", md5.Sum(b))] = v.ServiceDiscoveryConfig
+			for k, v := range cfg.AlertingConfig.AlertmanagerConfigs.ToMap() {
+				c[k] = v.ServiceDiscoveryConfig
 			}
 			return discoveryManagerNotify.ApplyConfig(c)
 		},

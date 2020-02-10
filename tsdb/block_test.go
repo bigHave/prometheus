@@ -197,9 +197,11 @@ func TestCorruptedChunk(t *testing.T) {
 				testutil.Equals(t, test.openErr.Error(), err.Error())
 				return
 			}
+			defer func() { testutil.Ok(t, b.Close()) }()
 
 			querier, err := NewBlockQuerier(b, 0, 1)
 			testutil.Ok(t, err)
+			defer func() { testutil.Ok(t, querier.Close()) }()
 			set, err := querier.Select(labels.MustNewMatcher(labels.MatchEqual, "a", "b"))
 			testutil.Ok(t, err)
 
@@ -264,9 +266,47 @@ func TestBlockSize(t *testing.T) {
 	}
 }
 
+func TestReadIndexFormatV1(t *testing.T) {
+	/* The block here was produced at the commit
+	    706602daed1487f7849990678b4ece4599745905 used in 2.0.0 with:
+	   db, _ := Open("v1db", nil, nil, nil)
+	   app := db.Appender()
+	   app.Add(labels.FromStrings("foo", "bar"), 1, 2)
+	   app.Add(labels.FromStrings("foo", "baz"), 3, 4)
+	   app.Add(labels.FromStrings("foo", "meh"), 1000*3600*4, 4) // Not in the block.
+	   // Make sure we've enough values for the lack of sorting of postings offsets to show up.
+	   for i := 0; i < 100; i++ {
+	     app.Add(labels.FromStrings("bar", strconv.FormatInt(int64(i), 10)), 0, 0)
+	   }
+	   app.Commit()
+	   db.compact()
+	   db.Close()
+	*/
+
+	blockDir := filepath.Join("testdata", "index_format_v1")
+	block, err := OpenBlock(nil, blockDir, nil)
+	testutil.Ok(t, err)
+
+	q, err := NewBlockQuerier(block, 0, 1000)
+	testutil.Ok(t, err)
+	testutil.Equals(t, query(t, q, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar")),
+		map[string][]tsdbutil.Sample{`{foo="bar"}`: []tsdbutil.Sample{sample{t: 1, v: 2}}})
+
+	q, err = NewBlockQuerier(block, 0, 1000)
+	testutil.Ok(t, err)
+	testutil.Equals(t, query(t, q, labels.MustNewMatcher(labels.MatchNotRegexp, "foo", "^.?$")),
+		map[string][]tsdbutil.Sample{
+			`{foo="bar"}`: []tsdbutil.Sample{sample{t: 1, v: 2}},
+			`{foo="baz"}`: []tsdbutil.Sample{sample{t: 3, v: 4}},
+		})
+}
+
 // createBlock creates a block with given set of series and returns its dir.
 func createBlock(tb testing.TB, dir string, series []Series) string {
-	head := createHead(tb, series)
+	return createBlockFromHead(tb, dir, createHead(tb, series))
+}
+
+func createBlockFromHead(tb testing.TB, dir string, head *Head) string {
 	compactor, err := NewLeveledCompactor(context.Background(), nil, log.NewNopLogger(), []int64{1000000}, nil)
 	testutil.Ok(tb, err)
 
@@ -280,7 +320,7 @@ func createBlock(tb testing.TB, dir string, series []Series) string {
 }
 
 func createHead(tb testing.TB, series []Series) *Head {
-	head, err := NewHead(nil, nil, nil, 2*60*60*1000)
+	head, err := NewHead(nil, nil, nil, 2*60*60*1000, DefaultStripeSize)
 	testutil.Ok(tb, err)
 	defer head.Close()
 

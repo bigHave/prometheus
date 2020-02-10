@@ -236,7 +236,7 @@ The following example returns all series that match either of the selectors
 `up` or `process_start_time_seconds{job="prometheus"}`:
 
 ```json
-$ curl -g 'http://localhost:9090/api/v1/series?' --data-urlencode='match[]=up' --data-urlencode='match[]=process_start_time_seconds{job="prometheus"}'
+$ curl -g 'http://localhost:9090/api/v1/series?' --data-urlencode 'match[]=up' --data-urlencode 'match[]=process_start_time_seconds{job="prometheus"}'
 {
    "status" : "success",
    "data" : [
@@ -482,6 +482,9 @@ guarantees as the overarching API v1.
 GET /api/v1/rules
 ```
 
+URL query parameters:
+- `type=alert|record`: return only the alerting rules (e.g. `type=alert`) or the recording rules (e.g. `type=record`). When the parameter is absent or empty, no filtering is done.
+
 ```json
 $ curl http://localhost:9090/api/v1/rules
 
@@ -665,6 +668,7 @@ GET /api/v1/metadata
 URL query parameters:
 
 - `limit=<number>`: Maximum number of metrics to return.
+- `metric=<string>`: A metric name to filter metadata for. All metric metadata is retrieved if left empty.
 
 The `data` section of the query result consists of an object where each key is a metric name and each value is a list of unique metadata objects, as exposed for that metric name across all targets.
 
@@ -683,6 +687,30 @@ curl -G http://localhost:9090/api/v1/metadata?limit=2
         "unit": ""
       }
     ],
+    "http_requests_total": [
+      {
+        "type": "counter",
+        "help": "Number of HTTP requests",
+        "unit": ""
+      },
+      {
+        "type": "counter",
+        "help": "Amount of HTTP requests",
+        "unit": ""
+      }
+    ]
+  }
+}
+```
+
+The following example returns metadata only for the metric `http_requests_total`.
+
+```json
+curl -G http://localhost:9090/api/v1/metadata?metric=http_requests_total
+
+{
+  "status": "success",
+  "data": {
     "http_requests_total": [
       {
         "type": "counter",
@@ -843,6 +871,8 @@ $ curl http://localhost:9090/api/v1/status/buildinfo
 
 **NOTE**: The exact returned build properties may change without notice between Prometheus versions.
 
+*New in v2.14*
+
 ### TSDB Stats
 
 The following endpoint returns various cardinality statistics about the Prometheus TSDB:
@@ -904,7 +934,7 @@ $ curl http://localhost:9090/api/v1/status/tsdb
 }
 ```
 
-*New in v2.14*
+*New in v2.15*
 
 ## TSDB Admin APIs
 These are APIs that expose database functionalities for the advanced user. These APIs are not enabled unless the `--web.enable-admin-api` is set.
