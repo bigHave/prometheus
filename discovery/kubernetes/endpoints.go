@@ -15,6 +15,7 @@ package kubernetes
 
 import (
 	"context"
+	"github.com/prometheus/prometheus/util/strutil"
 	"net"
 	"strconv"
 
@@ -169,7 +170,7 @@ func (e *Endpoints) process(ctx context.Context, ch chan<- []*targetgroup.Group)
 		return true
 	}
 	if !exists {
-		send(ctx, e.logger, RoleEndpoint, ch, &targetgroup.Group{Source: endpointsSourceFromNamespaceAndName(namespace, name)})
+		send(ctx, ch, &targetgroup.Group{Source: endpointsSourceFromNamespaceAndName(namespace, name)})
 		return true
 	}
 	eps, err := convertToEndpoints(o)
@@ -177,7 +178,7 @@ func (e *Endpoints) process(ctx context.Context, ch chan<- []*targetgroup.Group)
 		level.Error(e.logger).Log("msg", "converting to Endpoints object failed", "err", err)
 		return true
 	}
-	send(ctx, e.logger, RoleEndpoint, ch, e.buildEndpoints(eps))
+	send(ctx, ch, e.buildEndpoints(eps))
 	return true
 }
 
@@ -199,6 +200,8 @@ func endpointsSourceFromNamespaceAndName(namespace, name string) string {
 }
 
 const (
+	endpointsLabelPrefix           = metaLabelPrefix + "endpoints_label_"
+	endpointsLabelPresentPrefix    = metaLabelPrefix + "endpoints_labelpresent_"
 	endpointsNameLabel             = metaLabelPrefix + "endpoints_name"
 	endpointNodeName               = metaLabelPrefix + "endpoint_node_name"
 	endpointHostname               = metaLabelPrefix + "endpoint_hostname"
@@ -218,6 +221,12 @@ func (e *Endpoints) buildEndpoints(eps *apiv1.Endpoints) *targetgroup.Group {
 		endpointsNameLabel: lv(eps.Name),
 	}
 	e.addServiceLabels(eps.Namespace, eps.Name, tg)
+	//add endponits labels metadata
+	for k, v := range eps.Labels {
+		ln := strutil.SanitizeLabelName(k)
+		tg.Labels[model.LabelName(endpointsLabelPrefix+ln)] = lv(v)
+		tg.Labels[model.LabelName(endpointsLabelPresentPrefix+ln)] = presentValue
+	}
 
 	type podEntry struct {
 		pod          *apiv1.Pod

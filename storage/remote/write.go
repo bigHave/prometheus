@@ -14,17 +14,19 @@
 package remote
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/tsdb/wal"
 )
 
 var (
@@ -34,44 +36,55 @@ var (
 		Name:      "samples_in_total",
 		Help:      "Samples in to remote storage, compare to samples out for queue managers.",
 	})
-	highestTimestamp = maxGauge{
-		Gauge: promauto.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "highest_timestamp_in_seconds",
-			Help:      "Highest timestamp that has come into the remote storage via the Appender interface, in seconds since epoch.",
-		}),
-	}
 )
 
 // WriteStorage represents all the remote write storage.
 type WriteStorage struct {
-	reg    prometheus.Registerer
 	logger log.Logger
+	reg    prometheus.Registerer
 	mtx    sync.Mutex
 
-	queueMetrics      *queueManagerMetrics
-	configHash        string
-	externalLabelHash string
+	watcherMetrics    *wal.WatcherMetrics
+	liveReaderMetrics *wal.LiveReaderMetrics
+	externalLabels    labels.Labels
 	walDir            string
 	queues            map[string]*QueueManager
 	samplesIn         *ewmaRate
 	flushDeadline     time.Duration
+	interner          *pool
+	scraper           ReadyScrapeManager
+
+	// For timestampTracker.
+	highestTimestamp *maxTimestamp
 }
 
 // NewWriteStorage creates and runs a WriteStorage.
-func NewWriteStorage(logger log.Logger, reg prometheus.Registerer, walDir string, flushDeadline time.Duration) *WriteStorage {
+func NewWriteStorage(logger log.Logger, reg prometheus.Registerer, walDir string, flushDeadline time.Duration, sm ReadyScrapeManager) *WriteStorage {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
 	rws := &WriteStorage{
-		queues:        make(map[string]*QueueManager),
-		reg:           reg,
-		queueMetrics:  newQueueManagerMetrics(reg),
-		logger:        logger,
-		flushDeadline: flushDeadline,
-		samplesIn:     newEWMARate(ewmaWeight, shardUpdateDuration),
-		walDir:        walDir,
+		queues:            make(map[string]*QueueManager),
+		watcherMetrics:    wal.NewWatcherMetrics(reg),
+		liveReaderMetrics: wal.NewLiveReaderMetrics(reg),
+		logger:            logger,
+		reg:               reg,
+		flushDeadline:     flushDeadline,
+		samplesIn:         newEWMARate(ewmaWeight, shardUpdateDuration),
+		walDir:            walDir,
+		interner:          newPool(),
+		scraper:           sm,
+		highestTimestamp: &maxTimestamp{
+			Gauge: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: namespace,
+				Subsystem: subsystem,
+				Name:      "highest_timestamp_in_seconds",
+				Help:      "Highest timestamp that has come into the remote storage via the Appender interface, in seconds since epoch.",
+			}),
+		},
+	}
+	if reg != nil {
+		reg.MustRegister(rws.highestTimestamp)
 	}
 	go rws.run()
 	return rws
@@ -91,25 +104,10 @@ func (rws *WriteStorage) ApplyConfig(conf *config.Config) error {
 	rws.mtx.Lock()
 	defer rws.mtx.Unlock()
 
-	configHash, err := toHash(conf.RemoteWriteConfigs)
-	if err != nil {
-		return err
-	}
-	externalLabelHash, err := toHash(conf.GlobalConfig.ExternalLabels)
-	if err != nil {
-		return err
-	}
-
 	// Remote write queues only need to change if the remote write config or
 	// external labels change.
-	externalLabelUnchanged := externalLabelHash == rws.externalLabelHash
-	if configHash == rws.configHash && externalLabelUnchanged {
-		level.Debug(rws.logger).Log("msg", "remote write config has not changed, no need to restart QueueManagers")
-		return nil
-	}
-
-	rws.configHash = configHash
-	rws.externalLabelHash = externalLabelHash
+	externalLabelUnchanged := labels.Equal(conf.GlobalConfig.ExternalLabels, rws.externalLabels)
+	rws.externalLabels = conf.GlobalConfig.ExternalLabels
 
 	newQueues := make(map[string]*QueueManager)
 	newHashes := []string{}
@@ -119,49 +117,56 @@ func (rws *WriteStorage) ApplyConfig(conf *config.Config) error {
 			return err
 		}
 
-		// Set the queue name to the config hash if the user has not set
-		// a name in their remote write config so we can still differentiate
-		// between queues that have the same remote write endpoint.
-		name := string(hash[:6])
-		if rwConf.Name != "" {
-			name = rwConf.Name
-		}
-
 		// Don't allow duplicate remote write configs.
 		if _, ok := newQueues[hash]; ok {
 			return fmt.Errorf("duplicate remote write configs are not allowed, found duplicate for URL: %s", rwConf.URL)
 		}
 
-		var nameUnchanged bool
-		queue, ok := rws.queues[hash]
-		if ok {
-			nameUnchanged = queue.client.Name() == name
+		// Set the queue name to the config hash if the user has not set
+		// a name in their remote write config so we can still differentiate
+		// between queues that have the same remote write endpoint.
+		name := hash[:6]
+		if rwConf.Name != "" {
+			name = rwConf.Name
 		}
-		if externalLabelUnchanged && nameUnchanged {
+
+		c, err := NewWriteClient(name, &ClientConfig{
+			URL:              rwConf.URL,
+			Timeout:          rwConf.RemoteTimeout,
+			HTTPClientConfig: rwConf.HTTPClientConfig,
+			Headers:          rwConf.Headers,
+			RetryOnRateLimit: rwConf.QueueConfig.RetryOnRateLimit,
+		})
+		if err != nil {
+			return err
+		}
+
+		queue, ok := rws.queues[hash]
+		if externalLabelUnchanged && ok {
+			// Update the client in case any secret configuration has changed.
+			queue.SetClient(c)
 			newQueues[hash] = queue
 			delete(rws.queues, hash)
 			continue
 		}
 
-		c, err := NewClient(name, &ClientConfig{
-			URL:              rwConf.URL,
-			Timeout:          rwConf.RemoteTimeout,
-			HTTPClientConfig: rwConf.HTTPClientConfig,
-		})
-		if err != nil {
-			return err
-		}
+		endpoint := rwConf.URL.String()
 		newQueues[hash] = NewQueueManager(
-			rws.reg,
-			rws.queueMetrics,
+			newQueueManagerMetrics(rws.reg, name, endpoint),
+			rws.watcherMetrics,
+			rws.liveReaderMetrics,
 			rws.logger,
 			rws.walDir,
 			rws.samplesIn,
 			rwConf.QueueConfig,
+			rwConf.MetadataConfig,
 			conf.GlobalConfig.ExternalLabels,
 			rwConf.WriteRelabelConfigs,
 			c,
 			rws.flushDeadline,
+			rws.interner,
+			rws.highestTimestamp,
+			rws.scraper,
 		)
 		// Keep track of which queues are new so we know which to start.
 		newHashes = append(newHashes, hash)
@@ -183,10 +188,11 @@ func (rws *WriteStorage) ApplyConfig(conf *config.Config) error {
 }
 
 // Appender implements storage.Storage.
-func (rws *WriteStorage) Appender() (storage.Appender, error) {
+func (rws *WriteStorage) Appender(_ context.Context) storage.Appender {
 	return &timestampTracker{
-		writeStorage: rws,
-	}, nil
+		writeStorage:         rws,
+		highestRecvTimestamp: rws.highestTimestamp,
+	}
 }
 
 // Close closes the WriteStorage.
@@ -200,13 +206,14 @@ func (rws *WriteStorage) Close() error {
 }
 
 type timestampTracker struct {
-	writeStorage     *WriteStorage
-	samples          int64
-	highestTimestamp int64
+	writeStorage         *WriteStorage
+	samples              int64
+	highestTimestamp     int64
+	highestRecvTimestamp *maxTimestamp
 }
 
-// Add implements storage.Appender.
-func (t *timestampTracker) Add(_ labels.Labels, ts int64, v float64) (uint64, error) {
+// Append implements storage.Appender.
+func (t *timestampTracker) Append(_ uint64, _ labels.Labels, ts int64, _ float64) (uint64, error) {
 	t.samples++
 	if ts > t.highestTimestamp {
 		t.highestTimestamp = ts
@@ -214,18 +221,12 @@ func (t *timestampTracker) Add(_ labels.Labels, ts int64, v float64) (uint64, er
 	return 0, nil
 }
 
-// AddFast implements storage.Appender.
-func (t *timestampTracker) AddFast(l labels.Labels, _ uint64, ts int64, v float64) error {
-	_, err := t.Add(l, ts, v)
-	return err
-}
-
 // Commit implements storage.Appender.
 func (t *timestampTracker) Commit() error {
 	t.writeStorage.samplesIn.incr(t.samples)
 
 	samplesIn.Add(float64(t.samples))
-	highestTimestamp.Set(float64(t.highestTimestamp / 1000))
+	t.highestRecvTimestamp.Set(float64(t.highestTimestamp / 1000))
 	return nil
 }
 

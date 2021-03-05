@@ -26,8 +26,8 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
-
 	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/prometheus/pkg/labels"
@@ -100,13 +100,8 @@ func (mc *MetadataMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-// Appendable returns an Appender.
-type Appendable interface {
-	Appender() (storage.Appender, error)
-}
-
 // NewManager is the Manager constructor
-func NewManager(logger log.Logger, app Appendable) *Manager {
+func NewManager(logger log.Logger, app storage.Appendable) *Manager {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
@@ -127,7 +122,7 @@ func NewManager(logger log.Logger, app Appendable) *Manager {
 // when receiving new target groups form the discovery manager.
 type Manager struct {
 	logger    log.Logger
-	append    Appendable
+	append    storage.Appendable
 	graceShut chan struct{}
 
 	jitterSeed    uint64     // Global jitterSeed seed is used to spread scrape workload across HA setup.

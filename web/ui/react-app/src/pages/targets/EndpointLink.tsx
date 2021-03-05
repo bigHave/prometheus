@@ -3,9 +3,10 @@ import { Badge, Alert } from 'reactstrap';
 
 export interface EndpointLinkProps {
   endpoint: string;
+  globalUrl: string;
 }
 
-const EndpointLink: FC<EndpointLinkProps> = ({ endpoint }) => {
+const EndpointLink: FC<EndpointLinkProps> = ({ endpoint, globalUrl }) => {
   let url: URL;
   try {
     url = new URL(endpoint);
@@ -22,11 +23,11 @@ const EndpointLink: FC<EndpointLinkProps> = ({ endpoint }) => {
 
   return (
     <>
-      <a href={endpoint}>{`${protocol}//${host}${pathname}`}</a>
+      <a href={globalUrl}>{`${protocol}//${host}${pathname}`}</a>
       {params.length > 0 ? <br /> : null}
       {params.map(([labelName, labelValue]: [string, string]) => {
         return (
-          <Badge color="primary" className={`mr-1 ${labelName}`} key={labelName}>
+          <Badge color="primary" className="mr-1" key={`${labelName}/${labelValue}`}>
             {`${labelName}="${labelValue}"`}
           </Badge>
         );

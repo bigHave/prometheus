@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/util/teststorage"
 )
 
@@ -67,16 +68,11 @@ func BenchmarkRangeQuery(b *testing.B) {
 	numIntervals := 8640 + 10000
 
 	for s := 0; s < numIntervals; s++ {
-		a, err := storage.Appender()
-		if err != nil {
-			b.Fatal(err)
-		}
+		a := storage.Appender(context.Background())
 		ts := int64(s * 10000) // 10s interval.
 		for i, metric := range metrics {
-			err := a.AddFast(metric, refs[i], ts, float64(s))
-			if err != nil {
-				refs[i], _ = a.Add(metric, ts, float64(s))
-			}
+			ref, _ := a.Append(refs[i], metric, ts, float64(s))
+			refs[i] = ref
 		}
 		if err := a.Commit(); err != nil {
 			b.Fatal(err)
@@ -252,7 +248,7 @@ func BenchmarkParser(b *testing.B) {
 		b.Run(c, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				ParseExpr(c)
+				parser.ParseExpr(c)
 			}
 		})
 	}
@@ -261,7 +257,7 @@ func BenchmarkParser(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				ParseExpr(c)
+				parser.ParseExpr(c)
 			}
 		})
 	}

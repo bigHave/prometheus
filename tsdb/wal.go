@@ -31,6 +31,7 @@ import (
 	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/tsdb/encoding"
 	"github.com/prometheus/prometheus/tsdb/fileutil"
@@ -204,7 +205,7 @@ func OpenSegmentWAL(dir string, logger log.Logger, flushInterval time.Duration, 
 			w.files = append(w.files, newSegmentFile(f))
 			continue
 		}
-		level.Warn(logger).Log("msg", "invalid segment file detected, truncating WAL", "err", err, "file", fn)
+		level.Warn(logger).Log("msg", "Invalid segment file detected, truncating WAL", "err", err, "file", fn)
 
 		for _, fn := range fns[i:] {
 			if err := os.Remove(fn); err != nil {
@@ -889,19 +890,19 @@ func (r *walReader) Read(
 				if seriesf != nil {
 					seriesf(v)
 				}
-				//lint:ignore SA6002 safe to ignore and actually fixing it has some performance penalty.
+				//nolint:staticcheck // Ignore SA6002 safe to ignore and actually fixing it has some performance penalty.
 				seriesPool.Put(v[:0])
 			case []record.RefSample:
 				if samplesf != nil {
 					samplesf(v)
 				}
-				//lint:ignore SA6002 safe to ignore and actually fixing it has some performance penalty.
+				//nolint:staticcheck // Ignore SA6002 safe to ignore and actually fixing it has some performance penalty.
 				samplePool.Put(v[:0])
 			case []tombstones.Stone:
 				if deletesf != nil {
 					deletesf(v)
 				}
-				//lint:ignore SA6002 safe to ignore and actually fixing it has some performance penalty.
+				//nolint:staticcheck // Ignore SA6002 safe to ignore and actually fixing it has some performance penalty.
 				deletePool.Put(v[:0])
 			default:
 				level.Error(r.logger).Log("msg", "unexpected data type")
@@ -1233,7 +1234,7 @@ func MigrateWAL(logger log.Logger, dir string) (err error) {
 	if exists, err := deprecatedWALExists(logger, dir); err != nil || !exists {
 		return err
 	}
-	level.Info(logger).Log("msg", "migrating WAL format")
+	level.Info(logger).Log("msg", "Migrating WAL format")
 
 	tmpdir := dir + ".tmp"
 	if err := os.RemoveAll(tmpdir); err != nil {

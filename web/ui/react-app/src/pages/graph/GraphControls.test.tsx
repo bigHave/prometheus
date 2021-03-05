@@ -7,15 +7,23 @@ import { faPlus, faMinus, faChartArea, faChartLine } from '@fortawesome/free-sol
 import TimeInput from './TimeInput';
 
 const defaultGraphControlProps = {
-  range: 60 * 60 * 24,
+  range: 60 * 60 * 24 * 1000,
   endTime: 1572100217898,
   resolution: 10,
   stacked: false,
 
-  onChangeRange: (): void => {},
-  onChangeEndTime: (): void => {},
-  onChangeResolution: (): void => {},
-  onChangeStacking: (): void => {},
+  onChangeRange: (): void => {
+    // Do nothing.
+  },
+  onChangeEndTime: (): void => {
+    // Do nothing.
+  },
+  onChangeResolution: (): void => {
+    // Do nothing.
+  },
+  onChangeStacking: (): void => {
+    // Do nothing.
+  },
 };
 
 describe('GraphControls', () => {
@@ -73,7 +81,7 @@ describe('GraphControls', () => {
     const timeInput = controls.find(TimeInput);
     expect(timeInput).toHaveLength(1);
     expect(timeInput.prop('time')).toEqual(1572100217898);
-    expect(timeInput.prop('range')).toEqual(86400);
+    expect(timeInput.prop('range')).toEqual(86400000);
     expect(timeInput.prop('placeholder')).toEqual('End time');
   });
 
