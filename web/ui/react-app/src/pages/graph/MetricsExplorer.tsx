@@ -1,6 +1,5 @@
 import React, { Component } from 'react';
 import { Modal, ModalBody, ModalHeader } from 'reactstrap';
-import './MetricsExplorer.css';
 
 interface Props {
   show: boolean;
@@ -25,7 +24,7 @@ class MetricsExplorer extends Component<Props, {}> {
         <ModalHeader toggle={this.toggle}>Metrics Explorer</ModalHeader>
         <ModalBody>
           {this.props.metrics.map(metric => (
-            <p className="metric" key="metric" onClick={this.handleMetricClick.bind(this, metric)}>
+            <p key={metric} className="metric" onClick={this.handleMetricClick.bind(this, metric)}>
               {metric}
             </p>
           ))}

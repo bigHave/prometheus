@@ -19,11 +19,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-kit/kit/log"
+	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/pkg/exemplar"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/wal"
@@ -35,6 +36,12 @@ var (
 		Subsystem: subsystem,
 		Name:      "samples_in_total",
 		Help:      "Samples in to remote storage, compare to samples out for queue managers.",
+	})
+	exemplarsIn = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "exemplars_in_total",
+		Help:      "Exemplars in to remote storage, compare to exemplars out for queue managers.",
 	})
 )
 
@@ -134,6 +141,7 @@ func (rws *WriteStorage) ApplyConfig(conf *config.Config) error {
 			URL:              rwConf.URL,
 			Timeout:          rwConf.RemoteTimeout,
 			HTTPClientConfig: rwConf.HTTPClientConfig,
+			SigV4Config:      rwConf.SigV4Config,
 			Headers:          rwConf.Headers,
 			RetryOnRateLimit: rwConf.QueueConfig.RetryOnRateLimit,
 		})
@@ -167,6 +175,7 @@ func (rws *WriteStorage) ApplyConfig(conf *config.Config) error {
 			rws.interner,
 			rws.highestTimestamp,
 			rws.scraper,
+			rwConf.SendExemplars,
 		)
 		// Keep track of which queues are new so we know which to start.
 		newHashes = append(newHashes, hash)
@@ -208,6 +217,7 @@ func (rws *WriteStorage) Close() error {
 type timestampTracker struct {
 	writeStorage         *WriteStorage
 	samples              int64
+	exemplars            int64
 	highestTimestamp     int64
 	highestRecvTimestamp *maxTimestamp
 }
@@ -221,11 +231,17 @@ func (t *timestampTracker) Append(_ uint64, _ labels.Labels, ts int64, _ float64
 	return 0, nil
 }
 
+func (t *timestampTracker) AppendExemplar(_ uint64, _ labels.Labels, _ exemplar.Exemplar) (uint64, error) {
+	t.exemplars++
+	return 0, nil
+}
+
 // Commit implements storage.Appender.
 func (t *timestampTracker) Commit() error {
-	t.writeStorage.samplesIn.incr(t.samples)
+	t.writeStorage.samplesIn.incr(t.samples + t.exemplars)
 
 	samplesIn.Add(float64(t.samples))
+	exemplarsIn.Add(float64(t.exemplars))
 	t.highestRecvTimestamp.Set(float64(t.highestTimestamp / 1000))
 	return nil
 }

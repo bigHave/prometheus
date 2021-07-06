@@ -30,8 +30,8 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -39,6 +39,7 @@ import (
 	"github.com/prometheus/common/route"
 
 	"github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/pkg/exemplar"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/pkg/textparse"
 	"github.com/prometheus/prometheus/pkg/timestamp"
@@ -153,13 +154,15 @@ type TSDBAdminStats interface {
 	Snapshot(dir string, withHead bool) error
 
 	Stats(statsByLabelName string) (*tsdb.Stats, error)
+	WALReplayStatus() (tsdb.WALReplayStatus, error)
 }
 
 // API can register a set of endpoints in a router and handle
 // them using the provided storage and query engine.
 type API struct {
-	Queryable   storage.SampleAndChunkQueryable
-	QueryEngine *promql.Engine
+	Queryable         storage.SampleAndChunkQueryable
+	QueryEngine       *promql.Engine
+	ExemplarQueryable storage.ExemplarQueryable
 
 	targetRetriever       func(context.Context) TargetRetriever
 	alertmanagerRetriever func(context.Context) AlertmanagerRetriever
@@ -185,6 +188,7 @@ type API struct {
 
 func init() {
 	jsoniter.RegisterTypeEncoderFunc("promql.Point", marshalPointJSON, marshalPointJSONIsEmpty)
+	jsoniter.RegisterTypeEncoderFunc("exemplar.Exemplar", marshalExemplarJSON, marshalExemplarJSONEmpty)
 }
 
 // NewAPI returns an initialized API type.
@@ -192,6 +196,7 @@ func NewAPI(
 	qe *promql.Engine,
 	q storage.SampleAndChunkQueryable,
 	ap storage.Appendable,
+	eq storage.ExemplarQueryable,
 	tr func(context.Context) TargetRetriever,
 	ar func(context.Context) AlertmanagerRetriever,
 	configFunc func() config.Config,
@@ -213,8 +218,9 @@ func NewAPI(
 	registerer prometheus.Registerer,
 ) *API {
 	a := &API{
-		QueryEngine: qe,
-		Queryable:   q,
+		QueryEngine:       qe,
+		Queryable:         q,
+		ExemplarQueryable: eq,
 
 		targetRetriever:       tr,
 		alertmanagerRetriever: ar,
@@ -282,6 +288,8 @@ func (api *API) Register(r *route.Router) {
 	r.Post("/query", wrap(api.query))
 	r.Get("/query_range", wrap(api.queryRange))
 	r.Post("/query_range", wrap(api.queryRange))
+	r.Get("/query_exemplars", wrap(api.queryExemplars))
+	r.Post("/query_exemplars", wrap(api.queryExemplars))
 
 	r.Get("/labels", wrap(api.labelNames))
 	r.Post("/labels", wrap(api.labelNames))
@@ -302,6 +310,7 @@ func (api *API) Register(r *route.Router) {
 	r.Get("/status/buildinfo", wrap(api.serveBuildInfo))
 	r.Get("/status/flags", wrap(api.serveFlags))
 	r.Get("/status/tsdb", wrap(api.serveTSDBStatus))
+	r.Get("/status/walreplay", api.serveWALReplayStatus)
 	r.Post("/read", api.ready(http.HandlerFunc(api.remoteRead)))
 	r.Post("/write", api.ready(http.HandlerFunc(api.remoteWrite)))
 
@@ -354,6 +363,8 @@ func (api *API) query(r *http.Request) (result apiFuncResult) {
 	qry, err := api.QueryEngine.NewInstantQuery(api.Queryable, r.FormValue("query"), ts)
 	if err == promql.ErrValidationAtModifierDisabled {
 		err = errors.New("@ modifier is disabled, use --enable-feature=promql-at-modifier to enable it")
+	} else if err == promql.ErrValidationNegativeOffsetDisabled {
+		err = errors.New("negative offset is disabled, use --enable-feature=promql-negative-offset to enable it")
 	}
 	if err != nil {
 		return invalidParamError(err, "query")
@@ -432,6 +443,8 @@ func (api *API) queryRange(r *http.Request) (result apiFuncResult) {
 	qry, err := api.QueryEngine.NewRangeQuery(api.Queryable, r.FormValue("query"), start, end, step)
 	if err == promql.ErrValidationAtModifierDisabled {
 		err = errors.New("@ modifier is disabled, use --enable-feature=promql-at-modifier to enable it")
+	} else if err == promql.ErrValidationNegativeOffsetDisabled {
+		err = errors.New("negative offset is disabled, use --enable-feature=promql-negative-offset to enable it")
 	}
 	if err != nil {
 		return apiFuncResult{nil, &apiError{errorBadData, err}, nil, nil}
@@ -463,6 +476,44 @@ func (api *API) queryRange(r *http.Request) (result apiFuncResult) {
 		Result:     res.Value,
 		Stats:      qs,
 	}, nil, res.Warnings, qry.Close}
+}
+
+func (api *API) queryExemplars(r *http.Request) apiFuncResult {
+	start, err := parseTimeParam(r, "start", minTime)
+	if err != nil {
+		return invalidParamError(err, "start")
+	}
+	end, err := parseTimeParam(r, "end", maxTime)
+	if err != nil {
+		return invalidParamError(err, "end")
+	}
+	if end.Before(start) {
+		err := errors.New("end timestamp must not be before start timestamp")
+		return apiFuncResult{nil, &apiError{errorBadData, err}, nil, nil}
+	}
+
+	expr, err := parser.ParseExpr(r.FormValue("query"))
+	if err != nil {
+		return apiFuncResult{nil, &apiError{errorBadData, err}, nil, nil}
+	}
+
+	selectors := parser.ExtractSelectors(expr)
+	if len(selectors) < 1 {
+		return apiFuncResult{nil, nil, nil, nil}
+	}
+
+	ctx := r.Context()
+	eq, err := api.ExemplarQueryable.ExemplarQuerier(ctx)
+	if err != nil {
+		return apiFuncResult{nil, &apiError{errorExec, err}, nil, nil}
+	}
+
+	res, err := eq.Select(timestamp.FromTime(start), timestamp.FromTime(end), selectors...)
+	if err != nil {
+		return apiFuncResult{nil, &apiError{errorExec, err}, nil, nil}
+	}
+
+	return apiFuncResult{res, nil, nil, nil}
 }
 
 func returnAPIError(err error) *apiError {
@@ -1302,6 +1353,25 @@ func (api *API) serveTSDBStatus(*http.Request) apiFuncResult {
 	}, nil, nil, nil}
 }
 
+type walReplayStatus struct {
+	Min     int `json:"min"`
+	Max     int `json:"max"`
+	Current int `json:"current"`
+}
+
+func (api *API) serveWALReplayStatus(w http.ResponseWriter, r *http.Request) {
+	httputil.SetCORS(w, api.CORSOrigin, r)
+	status, err := api.db.WALReplayStatus()
+	if err != nil {
+		api.respondError(w, &apiError{errorInternal, err}, nil)
+	}
+	api.respond(w, walReplayStatus{
+		Min:     status.Min,
+		Max:     status.Max,
+		Current: status.Current,
+	}, nil)
+}
+
 func (api *API) remoteRead(w http.ResponseWriter, r *http.Request) {
 	// This is only really for tests - this will never be nil IRL.
 	if api.remoteReadHandler != nil {
@@ -1531,12 +1601,60 @@ OUTER:
 	return matcherSets, nil
 }
 
+// marshalPointJSON writes `[ts, "val"]`.
 func marshalPointJSON(ptr unsafe.Pointer, stream *jsoniter.Stream) {
 	p := *((*promql.Point)(ptr))
 	stream.WriteArrayStart()
+	marshalTimestamp(p.T, stream)
+	stream.WriteMore()
+	marshalValue(p.V, stream)
+	stream.WriteArrayEnd()
+}
+
+func marshalPointJSONIsEmpty(ptr unsafe.Pointer) bool {
+	return false
+}
+
+// marshalExemplarJSON writes.
+// {
+//    labels: <labels>,
+//    value: "<string>",
+//    timestamp: <float>
+// }
+func marshalExemplarJSON(ptr unsafe.Pointer, stream *jsoniter.Stream) {
+	p := *((*exemplar.Exemplar)(ptr))
+	stream.WriteObjectStart()
+
+	// "labels" key.
+	stream.WriteObjectField(`labels`)
+	lbls, err := p.Labels.MarshalJSON()
+	if err != nil {
+		stream.Error = err
+		return
+	}
+	stream.SetBuffer(append(stream.Buffer(), lbls...))
+
+	// "value" key.
+	stream.WriteMore()
+	stream.WriteObjectField(`value`)
+	marshalValue(p.Value, stream)
+
+	// "timestamp" key.
+	stream.WriteMore()
+	stream.WriteObjectField(`timestamp`)
+	marshalTimestamp(p.Ts, stream)
+	//marshalTimestamp(p.Ts, stream)
+
+	stream.WriteObjectEnd()
+}
+
+func marshalExemplarJSONEmpty(ptr unsafe.Pointer) bool {
+	return false
+}
+
+func marshalTimestamp(t int64, stream *jsoniter.Stream) {
 	// Write out the timestamp as a float divided by 1000.
 	// This is ~3x faster than converting to a float.
-	t := p.T
 	if t < 0 {
 		stream.WriteRaw(`-`)
 		t = -t
@@ -1553,13 +1671,14 @@ func marshalPointJSON(ptr unsafe.Pointer, stream *jsoniter.Stream) {
 		}
 		stream.WriteInt64(fraction)
 	}
-	stream.WriteMore()
-	stream.WriteRaw(`"`)
+}
 
+func marshalValue(v float64, stream *jsoniter.Stream) {
+	stream.WriteRaw(`"`)
 	// Taken from https://github.com/json-iterator/go/blob/master/stream_float.go#L71 as a workaround
 	// to https://github.com/json-iterator/go/issues/365 (jsoniter, to follow json standard, doesn't allow inf/nan).
 	buf := stream.Buffer()
-	abs := math.Abs(p.V)
+	abs := math.Abs(v)
 	fmt := byte('f')
 	// Note: Must use float32 comparisons for underlying float32 value to get precise cutoffs right.
 	if abs != 0 {
@@ -1567,13 +1686,7 @@ func marshalPointJSON(ptr unsafe.Pointer, stream *jsoniter.Stream) {
 			fmt = 'e'
 		}
 	}
-	buf = strconv.AppendFloat(buf, p.V, fmt, -1, 64)
+	buf = strconv.AppendFloat(buf, v, fmt, -1, 64)
 	stream.SetBuffer(buf)
-
 	stream.WriteRaw(`"`)
-	stream.WriteArrayEnd()
-}
-
-func marshalPointJSONIsEmpty(ptr unsafe.Pointer) bool {
-	return false
 }
