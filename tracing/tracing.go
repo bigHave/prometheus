@@ -15,6 +15,7 @@ package tracing
 
 import (
 	"context"
+	"reflect"
 	"time"
 
 	"github.com/go-kit/log"
@@ -72,7 +73,7 @@ func (m *Manager) ApplyConfig(cfg *config.Config) error {
 	// set, we have to restart the manager to make sure that new TLS
 	// certificates are picked up.
 	var blankTLSConfig config_util.TLSConfig
-	if m.config == cfg.TracingConfig && m.config.TLSConfig == blankTLSConfig {
+	if reflect.DeepEqual(m.config, cfg.TracingConfig) && m.config.TLSConfig == blankTLSConfig {
 		return nil
 	}
 
@@ -182,19 +183,40 @@ func getClient(tracingCfg config.TracingConfig) (otlptrace.Client, error) {
 		opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(tracingCfg.Endpoint)}
 		if tracingCfg.Insecure {
 			opts = append(opts, otlptracegrpc.WithInsecure())
+		} else {
+			// Use of TLS Credentials forces the use of TLS. Therefore it can
+			// only be set when `insecure` is set to false.
+			tlsConf, err := config_util.NewTLSConfig(&tracingCfg.TLSConfig)
+			if err != nil {
+				return nil, err
+			}
+			opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(tlsConf)))
 		}
-
-		tlsConf, err := config_util.NewTLSConfig(&tracingCfg.TLSConfig)
-		if err != nil {
-			return nil, err
+		if tracingCfg.Compression != "" {
+			opts = append(opts, otlptracegrpc.WithCompressor(tracingCfg.Compression))
 		}
-		opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(tlsConf)))
+		if len(tracingCfg.Headers) != 0 {
+			opts = append(opts, otlptracegrpc.WithHeaders(tracingCfg.Headers))
+		}
+		if tracingCfg.Timeout != 0 {
+			opts = append(opts, otlptracegrpc.WithTimeout(time.Duration(tracingCfg.Timeout)))
+		}
 
 		client = otlptracegrpc.NewClient(opts...)
 	case config.TracingClientHTTP:
 		opts := []otlptracehttp.Option{otlptracehttp.WithEndpoint(tracingCfg.Endpoint)}
 		if tracingCfg.Insecure {
 			opts = append(opts, otlptracehttp.WithInsecure())
+		}
+		// Currently, OTEL supports only gzip compression.
+		if tracingCfg.Compression == config.GzipCompression {
+			opts = append(opts, otlptracehttp.WithCompression(otlptracehttp.GzipCompression))
+		}
+		if len(tracingCfg.Headers) != 0 {
+			opts = append(opts, otlptracehttp.WithHeaders(tracingCfg.Headers))
+		}
+		if tracingCfg.Timeout != 0 {
+			opts = append(opts, otlptracehttp.WithTimeout(time.Duration(tracingCfg.Timeout)))
 		}
 
 		tlsConf, err := config_util.NewTLSConfig(&tracingCfg.TLSConfig)

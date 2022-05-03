@@ -99,7 +99,7 @@ remote_read:
 
 # Storage related settings that are runtime reloadable.
 storage:
-  [ - <exemplars> ... ]
+  [ exemplars: <exemplars> ]
 
 # Configures exporting traces.
 tracing:
@@ -197,6 +197,9 @@ oauth2:
 
 # Configure whether scrape requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 
 # Configures the scrape request's TLS settings.
 tls_config:
@@ -366,6 +369,12 @@ A `tls_config` allows configuring TLS connections.
 
 # Disable validation of the server certificate.
 [ insecure_skip_verify: <boolean> ]
+
+# Minimum acceptable TLS version. Accepted values: TLS10 (TLS 1.0), TLS11 (TLS
+# 1.1), TLS12 (TLS 1.2), TLS13 (TLS 1.3).
+# If unset, Prometheus will use Go default minimum version, which is TLS 1.2.
+# See MinVersion in https://pkg.go.dev/crypto/tls#Config.
+[ min_version: <string> ]
 ```
 
 ### `<oauth2>`
@@ -396,6 +405,9 @@ endpoint_params:
 # Configures the token request's TLS settings.
 tls_config:
   [ <tls_config> ]
+
+# Optional proxy URL.
+[ proxy_url: <string> ]
 ```
 
 ### `<azure_sd_config>`
@@ -436,6 +448,9 @@ subscription_id: <string>
 # Optional client secret. Only required with authentication_method OAuth.
 [ client_secret: <secret> ]
 
+# Optional resource group name. Limits discovery to this resource group. 
+[ resource_group: <string> ]
+
 # Refresh interval to re-read the instance list.
 [ refresh_interval: <duration> | default = 300s ]
 
@@ -474,6 +489,9 @@ oauth2:
 
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 
 # TLS configuration.
 tls_config:
@@ -571,6 +589,9 @@ oauth2:
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
 
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
+
 # TLS configuration.
 tls_config:
   [ <tls_config> ]
@@ -645,6 +666,9 @@ oauth2:
 
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 
 # TLS configuration.
 tls_config:
@@ -741,6 +765,9 @@ oauth2:
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
 
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
+
 ```
 
 The [relabeling phase](#relabel_config) is the preferred and more powerful
@@ -792,10 +819,10 @@ created using the `port` parameter defined in the SD configuration.
 
 Available meta labels:
 
+* `__meta_dockerswarm_container_label_<labelname>`: each label of the container
 * `__meta_dockerswarm_task_id`: the id of the task
 * `__meta_dockerswarm_task_container_id`: the container id of the task
 * `__meta_dockerswarm_task_desired_state`: the desired state of the task
-* `__meta_dockerswarm_task_label_<labelname>`: each label of the task
 * `__meta_dockerswarm_task_slot`: the slot of the task
 * `__meta_dockerswarm_task_state`: the state of the task
 * `__meta_dockerswarm_task_port_publish_mode`: the publish mode of the task port
@@ -905,6 +932,9 @@ oauth2:
 
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 
 ```
 
@@ -1208,6 +1238,9 @@ oauth2:
 
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 ```
 
 See [this example Prometheus configuration file](/documentation/examples/prometheus-puppetdb.yml)
@@ -1413,6 +1446,9 @@ oauth2:
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
 
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
+
 # TLS configuration.
 tls_config:
   [ <tls_config> ]
@@ -1448,8 +1484,9 @@ Example response body:
 ]
 ```
 
-The endpoint is queried periodically at the specified
-refresh interval.
+The endpoint is queried periodically at the specified refresh interval.
+The `prometheus_sd_http_failures_total` counter metric tracks the number of 
+refresh failures. 
 
 Each target has a meta label `__meta_url` during the
 [relabeling phase](#relabel_config). Its value is set to the
@@ -1493,6 +1530,9 @@ oauth2:
 
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 
 # TLS configuration.
 tls_config:
@@ -1693,6 +1733,9 @@ oauth2:
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
 
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
+
 # TLS configuration.
 tls_config:
   [ <tls_config> ]
@@ -1706,8 +1749,9 @@ namespaces:
 # Optional label and field selectors to limit the discovery process to a subset of available resources.
 # See https://kubernetes.io/docs/concepts/overview/working-with-objects/field-selectors/
 # and https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/ to learn more about the possible
-# filters that can be used. Endpoints role supports pod, service and endpoints selectors, other roles
-# only support selectors matching the role itself (e.g. node role can only contain node selectors).
+# filters that can be used. The endpoints role supports pod, service and endpoints selectors.
+# The pod role supports node selectors when configured with `attach_metadata: {node: true}`.
+# Other roles only support selectors matching the role itself (e.g. node role can only contain node selectors).
 
 # Note: When making decision about using field/label selector make sure that this
 # is the best approach - it will prevent Prometheus from reusing single list/watch
@@ -1719,6 +1763,12 @@ namespaces:
   [ - role: <string>
     [ label: <string> ]
     [ field: <string> ] ]]
+
+# Optional metadata to attach to discovered targets. If omitted, no additional metadata is attached.
+attach_metadata:
+# Attaches node metadata to discovered targets. Only valid for role: pod. 
+# When set to true, Prometheus must have permissions to get Nodes. 
+  [ node: <boolean> | default = false ]
 ```
 
 See [this example Prometheus configuration file](/documentation/examples/prometheus-kubernetes.yml)
@@ -1790,6 +1840,9 @@ oauth2:
 
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 ```
 
 The [relabeling phase](#relabel_config) is the preferred and more powerful way
@@ -1907,6 +1960,9 @@ oauth2:
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
 
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
+
 # TLS configuration.
 tls_config:
   [ <tls_config> ]
@@ -1989,6 +2045,9 @@ oauth2:
 
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 
 # TLS configuration for connecting to marathon servers
 tls_config:
@@ -2200,6 +2259,9 @@ tls_config:
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
 
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
+
 # Refresh interval to re-read the app instance list.
 [ refresh_interval: <duration> | default = 30s ]
 ```
@@ -2304,6 +2366,9 @@ tags_filter:
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
 
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
+
 # Optional proxy URL.
 [ proxy_url: <string> ]
 
@@ -2372,10 +2437,13 @@ oauth2:
   [ <oauth2> ]
 
 # Optional proxy URL.
-  [ proxy_url: <string> ]
+[ proxy_url: <string> ]
 
 # Configure whether HTTP requests follow HTTP 3xx redirects.
-  [ follow_redirects: <boolean> | default = true ]
+[ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 
 # TLS configuration.
 tls_config:
@@ -2468,12 +2536,14 @@ anchored on both ends. To un-anchor the regex, use `.*<regex>.*`.
   `target_label` to `replacement`, with match group references
   (`${1}`, `${2}`, ...) in `replacement` substituted by their value. If `regex`
   does not match, no replacement takes place.
+* `lowercase`: Maps the concatenated `source_labels` to their lower case.
+* `uppercase`: Maps the concatenated `source_labels` to their upper case.
 * `keep`: Drop targets for which `regex` does not match the concatenated `source_labels`.
 * `drop`: Drop targets for which `regex` matches the concatenated `source_labels`.
 * `hashmod`: Set `target_label` to the `modulus` of a hash of the concatenated `source_labels`.
-* `labelmap`: Match `regex` against all label names. Then copy the values of the matching labels
-   to label names given by `replacement` with match group references
-  (`${1}`, `${2}`, ...) in `replacement` substituted by their value.
+* `labelmap`: Match `regex` against all source label names, not just those specified in `source_labels`. Then
+   copy the values of the matching labels  to label names given by `replacement` with match
+   group references (`${1}`, `${2}`, ...) in `replacement` substituted by their value.
 * `labeldrop`: Match `regex` against all label names. Any label that matches will be
   removed from the set of labels.
 * `labelkeep`: Match `regex` against all label names. Any label that does not match will be
@@ -2558,6 +2628,9 @@ tls_config:
 
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 
 # List of Azure service discovery configurations.
 azure_sd_configs:
@@ -2668,14 +2741,24 @@ relabel_configs:
 # Client used to export the traces. Options are 'http' or 'grpc'.
 [ client_type: <string> | default = grpc ]
 
-# Endpoint to send the traces to.
+# Endpoint to send the traces to. Should be provided in format <host>:<port>.
 [ endpoint: <string> ]
 
 # Sets the probability a given trace will be sampled. Must be a float from 0 through 1.
 [ sampling_fraction: <float> | default = 0 ]
 
 # If disabled, the client will use a secure connection.
-[ insecure: <boolean> | default = true ]
+[ insecure: <boolean> | default = false ]
+
+# Key-value pairs to be used as headers associated with gRPC or HTTP requests.
+headers:
+  [ <string>: <string> ... ]
+
+# Compression key for supported compression types. Supported compression: gzip.
+[ compression: <string> ]
+
+# Maximum time the exporter will wait for each batch export.
+[ timeout: <duration> | default = 10s ]
 
 # TLS configuration.
 tls_config:
@@ -2767,6 +2850,9 @@ tls_config:
 
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 
 # Configures the queue used to write to remote storage.
 queue_config:
@@ -2868,6 +2954,9 @@ tls_config:
 
 # Configure whether HTTP requests follow HTTP 3xx redirects.
 [ follow_redirects: <boolean> | default = true ]
+
+# Whether to enable HTTP2.
+[ enable_http2: <bool> | default: true ]
 
 # Whether to use the external labels as selectors for the remote read endpoint.
 [ filter_external_labels: <boolean> | default = true ]

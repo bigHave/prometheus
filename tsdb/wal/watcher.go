@@ -16,7 +16,6 @@ package wal
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"os"
 	"path"
@@ -50,7 +49,6 @@ type WriteTo interface {
 	// Once returned, the WAL Watcher will not attempt to pass that data again.
 	Append([]record.RefSample) bool
 	AppendExemplars([]record.RefExemplar) bool
-
 	StoreSeries([]record.RefSeries, int)
 
 	// Next two methods are intended for garbage-collection: first we call
@@ -306,7 +304,7 @@ func (w *Watcher) firstAndLast() (int, int, error) {
 // Copied from tsdb/wal/wal.go so we do not have to open a WAL.
 // Plan is to move WAL watcher to TSDB and dedupe these implementations.
 func (w *Watcher) segments(dir string) ([]int, error) {
-	files, err := ioutil.ReadDir(dir)
+	files, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}

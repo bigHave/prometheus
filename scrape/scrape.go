@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"net/http"
 	"reflect"
@@ -224,6 +223,7 @@ type scrapePool struct {
 	appendable storage.Appendable
 	logger     log.Logger
 	cancel     context.CancelFunc
+	httpOpts   []config_util.HTTPClientOption
 
 	// mtx must not be taken after targetMtx.
 	mtx    sync.Mutex
@@ -264,13 +264,13 @@ const maxAheadTime = 10 * time.Minute
 
 type labelsMutator func(labels.Labels) labels.Labels
 
-func newScrapePool(cfg *config.ScrapeConfig, app storage.Appendable, jitterSeed uint64, logger log.Logger, reportExtraMetrics bool) (*scrapePool, error) {
+func newScrapePool(cfg *config.ScrapeConfig, app storage.Appendable, jitterSeed uint64, logger log.Logger, reportExtraMetrics bool, httpOpts []config_util.HTTPClientOption) (*scrapePool, error) {
 	targetScrapePools.Inc()
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
 
-	client, err := config_util.NewClientFromConfig(cfg.HTTPClientConfig, cfg.JobName)
+	client, err := config_util.NewClientFromConfig(cfg.HTTPClientConfig, cfg.JobName, httpOpts...)
 	if err != nil {
 		targetScrapePoolsFailed.Inc()
 		return nil, errors.Wrap(err, "error creating HTTP client")
@@ -287,6 +287,7 @@ func newScrapePool(cfg *config.ScrapeConfig, app storage.Appendable, jitterSeed 
 		activeTargets: map[uint64]*Target{},
 		loops:         map[uint64]loop{},
 		logger:        logger,
+		httpOpts:      httpOpts,
 	}
 	sp.newLoop = func(opts scrapeLoopOptions) loop {
 		// Update the targets retrieval function for metadata to a new scrape cache.
@@ -381,7 +382,7 @@ func (sp *scrapePool) reload(cfg *config.ScrapeConfig) error {
 	targetScrapePoolReloads.Inc()
 	start := time.Now()
 
-	client, err := config_util.NewClientFromConfig(cfg.HTTPClientConfig, cfg.JobName)
+	client, err := config_util.NewClientFromConfig(cfg.HTTPClientConfig, cfg.JobName, sp.httpOpts...)
 	if err != nil {
 		targetScrapePoolReloadsFailed.Inc()
 		return errors.Wrap(err, "error creating HTTP client")
@@ -613,7 +614,7 @@ func verifyLabelLimits(lset labels.Labels, limits *labelLimits) error {
 	if limits.labelLimit > 0 {
 		nbLabels := len(lset)
 		if nbLabels > int(limits.labelLimit) {
-			return fmt.Errorf("label_limit exceeded (metric: %.50s, number of label: %d, limit: %d)", met, nbLabels, limits.labelLimit)
+			return fmt.Errorf("label_limit exceeded (metric: %.50s, number of labels: %d, limit: %d)", met, nbLabels, limits.labelLimit)
 		}
 	}
 
@@ -625,14 +626,14 @@ func verifyLabelLimits(lset labels.Labels, limits *labelLimits) error {
 		if limits.labelNameLengthLimit > 0 {
 			nameLength := len(l.Name)
 			if nameLength > int(limits.labelNameLengthLimit) {
-				return fmt.Errorf("label_name_length_limit exceeded (metric: %.50s, label: %.50v, name length: %d, limit: %d)", met, l, nameLength, limits.labelNameLengthLimit)
+				return fmt.Errorf("label_name_length_limit exceeded (metric: %.50s, label name: %.50s, length: %d, limit: %d)", met, l.Name, nameLength, limits.labelNameLengthLimit)
 			}
 		}
 
 		if limits.labelValueLengthLimit > 0 {
 			valueLength := len(l.Value)
 			if valueLength > int(limits.labelValueLengthLimit) {
-				return fmt.Errorf("label_value_length_limit exceeded (metric: %.50s, label: %.50v, value length: %d, limit: %d)", met, l, valueLength, limits.labelValueLengthLimit)
+				return fmt.Errorf("label_value_length_limit exceeded (metric: %.50s, label name: %.50s, value: %.50q, length: %d, limit: %d)", met, l.Name, l.Value, valueLength, limits.labelValueLengthLimit)
 			}
 		}
 	}
@@ -771,7 +772,7 @@ func (s *targetScraper) scrape(ctx context.Context, w io.Writer) (string, error)
 		return "", err
 	}
 	defer func() {
-		io.Copy(ioutil.Discard, resp.Body)
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}()
 
@@ -1373,7 +1374,8 @@ func (sl *scrapeLoop) endOfRunStaleness(last time.Time, ticker *time.Ticker, int
 	// Call sl.append again with an empty scrape to trigger stale markers.
 	// If the target has since been recreated and scraped, the
 	// stale markers will be out of order and ignored.
-	app := sl.appender(sl.ctx)
+	// sl.context would have been cancelled, hence using sl.parentCtx.
+	app := sl.appender(sl.parentCtx)
 	var err error
 	defer func() {
 		if err != nil {
@@ -1387,7 +1389,7 @@ func (sl *scrapeLoop) endOfRunStaleness(last time.Time, ticker *time.Ticker, int
 	}()
 	if _, _, _, err = sl.append(app, []byte{}, "", staleTime); err != nil {
 		app.Rollback()
-		app = sl.appender(sl.ctx)
+		app = sl.appender(sl.parentCtx)
 		level.Warn(sl.l).Log("msg", "Stale append failed", "err", err)
 	}
 	if err = sl.reportStale(app, staleTime); err != nil {
@@ -1777,9 +1779,6 @@ func zeroConfig(c *config.ScrapeConfig) *config.ScrapeConfig {
 	z.ScrapeInterval = 0
 	z.ScrapeTimeout = 0
 	z.SampleLimit = 0
-	z.LabelLimit = 0
-	z.LabelNameLengthLimit = 0
-	z.LabelValueLengthLimit = 0
 	z.HTTPClientConfig = config_util.HTTPClientConfig{}
 	return &z
 }

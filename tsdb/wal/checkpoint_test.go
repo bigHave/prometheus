@@ -16,7 +16,6 @@ package wal
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,7 +85,7 @@ func TestDeleteCheckpoints(t *testing.T) {
 
 	require.NoError(t, DeleteCheckpoints(dir, 2))
 
-	files, err := ioutil.ReadDir(dir)
+	files, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	fns := []string{}
 	for _, f := range files {
@@ -100,7 +99,7 @@ func TestDeleteCheckpoints(t *testing.T) {
 
 	require.NoError(t, DeleteCheckpoints(dir, 100000000))
 
-	files, err = ioutil.ReadDir(dir)
+	files, err = os.ReadDir(dir)
 	require.NoError(t, err)
 	fns = []string{}
 	for _, f := range files {
@@ -183,7 +182,7 @@ func TestCheckpoint(t *testing.T) {
 			require.NoError(t, DeleteCheckpoints(w.Dir(), 106))
 
 			// Only the new checkpoint should be left.
-			files, err := ioutil.ReadDir(dir)
+			files, err := os.ReadDir(dir)
 			require.NoError(t, err)
 			require.Equal(t, 1, len(files))
 			require.Equal(t, "checkpoint.00000106", files[0].Name())
@@ -252,7 +251,7 @@ func TestCheckpointNoTmpFolderAfterError(t *testing.T) {
 	// Walk the wal dir to make sure there are no tmp folder left behind after the error.
 	err = filepath.Walk(w.Dir(), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return errors.Wrapf(err, "access err %q: %v\n", path, err)
+			return errors.Wrapf(err, "access err %q: %v", path, err)
 		}
 		if info.IsDir() && strings.HasSuffix(info.Name(), ".tmp") {
 			return fmt.Errorf("wal dir contains temporary folder:%s", info.Name())

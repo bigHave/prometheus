@@ -16,10 +16,10 @@ package remote
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"net/url"
 	"os"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -413,11 +413,53 @@ func TestReshardPartialBatch(t *testing.T) {
 		case <-done:
 		case <-time.After(2 * time.Second):
 			t.Error("Deadlock between sending and stopping detected")
+			pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
 			t.FailNow()
 		}
 	}
 	// We can only call stop if there was not a deadlock.
 	m.Stop()
+}
+
+// TestQueueFilledDeadlock makes sure the code does not deadlock in the case
+// where a large scrape (> capacity + max samples per send) is appended at the
+// same time as a batch times out according to the batch send deadline.
+func TestQueueFilledDeadlock(t *testing.T) {
+	samples, series := createTimeseries(50, 1)
+
+	c := NewNopWriteClient()
+
+	cfg := config.DefaultQueueConfig
+	mcfg := config.DefaultMetadataConfig
+	cfg.MaxShards = 1
+	cfg.MaxSamplesPerSend = 10
+	cfg.Capacity = 20
+	flushDeadline := time.Second
+	batchSendDeadline := time.Millisecond
+	cfg.BatchSendDeadline = model.Duration(batchSendDeadline)
+
+	metrics := newQueueManagerMetrics(nil, "", "")
+
+	m := NewQueueManager(metrics, nil, nil, nil, t.TempDir(), newEWMARate(ewmaWeight, shardUpdateDuration), cfg, mcfg, nil, nil, c, flushDeadline, newPool(), newHighestTimestampMetric(), nil, false)
+	m.StoreSeries(series, 0)
+	m.Start()
+	defer m.Stop()
+
+	for i := 0; i < 100; i++ {
+		done := make(chan struct{})
+		go func() {
+			time.Sleep(batchSendDeadline)
+			m.Append(samples)
+			done <- struct{}{}
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("Deadlock between sending and appending detected")
+			pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+			t.FailNow()
+		}
+	}
 }
 
 func TestReleaseNoninternedString(t *testing.T) {
@@ -781,7 +823,7 @@ func BenchmarkStartup(b *testing.B) {
 
 	// Find the second largest segment; we will replay up to this.
 	// (Second largest as WALWatcher will start tailing the largest).
-	dirents, err := ioutil.ReadDir(dir)
+	dirents, err := os.ReadDir(dir)
 	require.NoError(b, err)
 
 	var segments []int
@@ -1139,4 +1181,30 @@ func TestQueueManagerMetrics(t *testing.T) {
 	metrics.unregister()
 	err = client_testutil.GatherAndCompare(reg, strings.NewReader(""))
 	require.NoError(t, err)
+}
+
+func TestQueue_FlushAndShutdownDoesNotDeadlock(t *testing.T) {
+	capacity := 100
+	batchSize := 10
+	queue := newQueue(batchSize, capacity)
+	for i := 0; i < capacity+batchSize; i++ {
+		queue.Append(sampleOrExemplar{})
+	}
+
+	done := make(chan struct{})
+	go queue.FlushAndShutdown(done)
+	go func() {
+		// Give enough time for FlushAndShutdown to acquire the lock. queue.Batch()
+		// should not block forever even if the lock is acquired.
+		time.Sleep(10 * time.Millisecond)
+		queue.Batch()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Deadlock in FlushAndShutdown detected")
+		pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+		t.FailNow()
+	}
 }
